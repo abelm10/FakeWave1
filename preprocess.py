@@ -32,6 +32,9 @@ before trusting it inside training (see main()).
 import argparse
 import io
 import random
+import shutil
+import subprocess
+import tempfile
 import warnings
 from fractions import Fraction
 from pathlib import Path
@@ -93,6 +96,38 @@ LABEL_TO_INT = {"real": 0, "fake": 1}
 # --------------------------------------------------------------------------
 # Pipeline steps
 # --------------------------------------------------------------------------
+def _decode_via_ffmpeg(path):
+    """Fallback decoder for containers libsndfile cannot open (m4a/aac, webm/opus).
+
+    Decodes to a temporary PCM float32 WAV at the file's NATIVE sample rate and
+    channel count, then hands the result back to soundfile. Resampling (step 2)
+    and mono collapse (load_raw) stay exactly where they already are, so this
+    fallback changes only how bytes are decoded -- it adds no processing step.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError(
+            f"Cannot decode {path!r}: libsndfile does not support this container "
+            "and ffmpeg was not found on PATH. Install it with "
+            "`winget install ffmpeg`, then restart your shell."
+        )
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+             "-i", str(path), "-c:a", "pcm_f32le", tmp.name],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed to decode {path!r} (exit {proc.returncode}): "
+                f"{proc.stderr.strip()[:500]}"
+            )
+        return sf.read(tmp.name, dtype="float32", always_2d=True)
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+
+
 def load_raw(path):
     """Step 1. Decode raw audio via soundfile and collapse to mono float32.
 
@@ -100,8 +135,19 @@ def load_raw(path):
     torchcodec/ffmpeg for compressed formats and has been broken for some
     files in this dataset (mp3/mixed formats across sources); soundfile
     (libsndfile) decodes wav/mp3/flac/ogg directly and consistently.
+
+    FALLBACK: libsndfile cannot open m4a/aac or webm/opus, which is what
+    browsers hand back from gr.Audio microphone recordings. Those used to
+    raise LibsndfileError before the model ever ran (see app_run.log), so a
+    live recording failed outright rather than being classified. Such files
+    are re-decoded through ffmpeg. The fallback triggers on DECODER FAILURE
+    ONLY, never on label -- a real .m4a and a fake .m4a take the identical
+    path, so the pipeline stays symmetric.
     """
-    data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    try:
+        data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    except sf.LibsndfileError:
+        data, sr = _decode_via_ffmpeg(path)
     wav = data.mean(axis=1).astype(np.float32)
     return wav, sr
 

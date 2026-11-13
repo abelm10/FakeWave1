@@ -21,7 +21,10 @@ _ANALYZED_SEC = CONFIG["target_duration_sec"]
 def analyze(audio_path):
     if audio_path is None:
         return None, None, None
-    _, _, probs, spectrogram_rgb, overlay_rgb = explain(audio_path, model=_model)
+    try:
+        _, _, probs, spectrogram_rgb, overlay_rgb = explain(audio_path, model=_model)
+    except Exception as exc:
+        raise gr.Error(f"Could not analyze this clip: {exc}")
     return probs, spectrogram_rgb, overlay_rgb
 
 
@@ -38,7 +41,7 @@ with gr.Blocks(title="FakeWave") as demo:
     with gr.Row():
         result_label = gr.Label(label="Result", num_top_classes=2)
 
-    gr.Markdown(f"*Analyzed: first {_ANALYZED_SEC:.1f} seconds of audio*")
+    gr.Markdown(f"*Analyzed: a {_ANALYZED_SEC:.1f}-second window from the middle of the clip*")
 
     with gr.Row():
         spectrogram_img = gr.Image(
