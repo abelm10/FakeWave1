@@ -139,6 +139,24 @@ def analyze_timeline(path, model, config=CONFIG, hop_sec=WINDOW_HOP_SEC,
     }
 
 
+def window_audio(wav, sr, start, end):
+    """The conditioned audio for one window, as Gradio wants it: (sr, int16 array).
+
+    This is post-resample, post-codec-normalization, post-silence-trim audio --
+    i.e. what the classifier was actually fed, NOT the original recording. It is
+    deliberately not RMS-normalized: normalizing per window would flatten the
+    loudness differences between segments and make them sound misleadingly alike.
+
+    Window times are relative to the trimmed waveform, so they do not map to
+    timestamps in the original file (the leading-silence offset is not recorded).
+    """
+    seg = np.asarray(wav[start:end], dtype=np.float32)
+    if seg.size == 0:
+        return sr, np.zeros(1, dtype=np.int16)
+    seg = np.clip(seg, -1.0, 1.0)
+    return sr, np.round(seg * 32767.0).astype(np.int16)
+
+
 def explain_window(wav, sr, start, end, model, config=CONFIG):
     """Grad-CAM for one window -> (fake_prob, spectrogram_rgb, overlay_rgb)."""
     logmel = window_logmel(wav, sr, start, end, config)

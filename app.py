@@ -91,6 +91,7 @@ def analyze(audio_path, progress=gr.Progress()):
         _banner(result),
         strip,
         gr.update(choices=_choices(windows), value=best["index"]),
+        _window_audio(result, best),
         spec_rgb,
         overlay_rgb,
         rows,
@@ -99,10 +100,16 @@ def analyze(audio_path, progress=gr.Progress()):
     )
 
 
+def _window_audio(result, w):
+    """Slice the cached conditioned waveform for one window (no re-decode, no re-analysis)."""
+    sr = result["sr"]
+    return timeline.window_audio(result["conditioned_wav"], sr, round(w["start_sec"] * sr), round(w["end_sec"] * sr))
+
+
 def show_window(index, result):
     """Dropdown handler: Grad-CAM for one window of the cached analysis. Does not re-run the timeline."""
     if index is None or result is None:
-        return None, None
+        return None, None, None
     try:
         w = result["windows"][int(index)]
         sr = result["sr"]
@@ -111,7 +118,7 @@ def show_window(index, result):
         )
     except Exception as exc:
         raise gr.Error(f"Could not analyze this clip: {exc}")
-    return spec_rgb, overlay_rgb
+    return _window_audio(result, w), spec_rgb, overlay_rgb
 
 
 def make_report(result, index, case_ref, examiner, notes):
@@ -198,15 +205,21 @@ with gr.Blocks(title="FakeWave") as demo:
                     banner = gr.HTML(_PLACEHOLDER)
                     strip_img = gr.Image(label="Timeline: p(synthetic) per 4-second window", show_label=True)
                     window_dd = gr.Dropdown(label="Segment (defaults to the most suspicious)", choices=[], value=None)
+                    segment_audio = gr.Audio(label="Selected segment (as analyzed)", interactive=False)
+                    gr.Markdown(
+                        "*Playback is the conditioned audio the model scored — 16 kHz, codec-normalized, "
+                        "silence-trimmed. It is not the original recording, and these timestamps are "
+                        "relative to the trimmed audio.*"
+                    )
                     with gr.Row():
-                        spectrogram_img = gr.Image(label="Mel spectrogram (selected segment)", height=320)
+                        spectrogram_img =gr.Image(label="Mel spectrogram (selected segment)", height=320)
                         overlay_img = gr.Image(label="Grad-CAM (selected segment)", height=320)
                     report_btn = gr.Button("Generate case report")
                     report_files = gr.File(label="Case report", file_count="multiple")
                     with gr.Accordion("All segment scores", open=False):
                         table = gr.Dataframe(headers=_TABLE_HEADERS, interactive=False)
                     clear_btn = gr.ClearButton(
-                        [audio_input, details_md, banner, strip_img, window_dd, spectrogram_img, overlay_img, table]
+                        [audio_input, details_md, banner, strip_img, window_dd, segment_audio, spectrogram_img, overlay_img, table]
                     )
 
         with gr.Tab("Batch"):
@@ -219,10 +232,10 @@ with gr.Blocks(title="FakeWave") as demo:
             batch_table = gr.Dataframe(headers=batch.CSV_COLUMNS, interactive=False)
             batch_files = gr.File(label="Batch results (CSV + JSON)", file_count="multiple")
 
-    outputs = [details_md, banner, strip_img, window_dd, spectrogram_img, overlay_img, table, result_state]
+    outputs = [details_md, banner, strip_img, window_dd, segment_audio, spectrogram_img, overlay_img, table, result_state]
     # Button only: wiring audio_input.change as well would analyze every upload twice.
     analyze_btn.click(fn=analyze, inputs=audio_input, outputs=outputs)
-    window_dd.change(fn=show_window, inputs=[window_dd, result_state], outputs=[spectrogram_img, overlay_img])
+    window_dd.change(fn=show_window, inputs=[window_dd, result_state], outputs=[segment_audio, spectrogram_img, overlay_img])
     clear_btn.click(fn=lambda: None, inputs=None, outputs=result_state)
     report_btn.click(
         fn=make_report,
