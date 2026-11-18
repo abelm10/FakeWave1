@@ -21,6 +21,7 @@ import gradio as gr
 print(f"gradio {gr.__version__}")
 
 from predict import load_model
+import batch
 import report
 import timeline
 
@@ -140,6 +141,41 @@ def make_report(result, index, case_ref, examiner, notes):
     return [html_path, json_path]
 
 
+def run_batch(folder, recursive, expected, progress=gr.Progress()):
+    """Batch tab handler: forward passes only, results to reports/. The scanned folder is never written to."""
+    folder = (folder or "").strip().strip('"')
+    if not folder:
+        raise gr.Error("Enter a folder path.")
+    expected_label = {"all real": "real", "all fake": "fake"}.get(expected)
+    try:
+        files = batch.find_audio_files(folder, bool(recursive))
+    except FileNotFoundError as exc:
+        raise gr.Error(str(exc))
+    except Exception as exc:
+        raise gr.Error(f"Could not read this folder: {exc}")
+    if not files:
+        raise gr.Error(f"No audio files ({', '.join(sorted(batch.AUDIO_EXTS))}) found in {folder}")
+    try:
+        result = batch.analyze_folder(
+            folder, _model, recursive=bool(recursive), expected_label=expected_label, model_path=MODEL_PATH,
+            progress_cb=lambda done, total, name: progress(done / total, desc=f"{done}/{total}: {name}"),
+        )
+        csv_path, json_path = batch.write_batch_csv(result)
+    except Exception as exc:
+        raise gr.Error(f"Batch failed: {exc}")
+    lines = [
+        f"**Files scanned:** {result['n_files']} &nbsp; **Succeeded:** {result['n_ok']} &nbsp; **Failed:** {result['n_failed']}",
+    ]
+    if expected_label is not None:
+        acc = "n/a" if result["accuracy"] is None else f"{result['accuracy']:.1%}"
+        lines.append(
+            f"**Expected {expected_label}:** {result['n_correct']} / {result['n_ok']} correct ({acc}) "
+            f"&nbsp; **Inconclusive:** {result['n_inconclusive']} (counted as neither right nor wrong)"
+        )
+    table_rows = [[("" if r[c] is None else r[c]) for c in batch.CSV_COLUMNS] for r in result["rows"]]
+    return "\n\n".join(lines), table_rows, [csv_path, json_path]
+
+
 with gr.Blocks(title="FakeWave") as demo:
     gr.Markdown(
         '<h1 style="text-align:center">FakeWave</h1>\n'
@@ -147,29 +183,41 @@ with gr.Blocks(title="FakeWave") as demo:
     )
     result_state = gr.State(None)
 
-    with gr.Row():
-        with gr.Column(scale=1):
-            audio_input = gr.Audio(type="filepath", label="Hindi audio clip (upload or record)")
-            analyze_btn = gr.Button("Analyze", variant="primary")
-            details_md = gr.Markdown("*Clip details appear here after analysis.*")
-            with gr.Accordion("Case details", open=False):
-                case_ref_box = gr.Textbox(label="Case reference")
-                examiner_box = gr.Textbox(label="Examiner")
-                notes_box = gr.Textbox(label="Notes", lines=3)
-        with gr.Column(scale=2):
-            banner = gr.HTML(_PLACEHOLDER)
-            strip_img = gr.Image(label="Timeline: p(synthetic) per 4-second window", show_label=True)
-            window_dd = gr.Dropdown(label="Segment (defaults to the most suspicious)", choices=[], value=None)
+    with gr.Tabs():
+        with gr.Tab("Single clip"):
             with gr.Row():
-                spectrogram_img = gr.Image(label="Mel spectrogram (selected segment)", height=320)
-                overlay_img = gr.Image(label="Grad-CAM (selected segment)", height=320)
-            report_btn = gr.Button("Generate case report")
-            report_files = gr.File(label="Case report", file_count="multiple")
-            with gr.Accordion("All segment scores", open=False):
-                table = gr.Dataframe(headers=_TABLE_HEADERS, interactive=False)
-            clear_btn = gr.ClearButton(
-                [audio_input, details_md, banner, strip_img, window_dd, spectrogram_img, overlay_img, table]
-            )
+                with gr.Column(scale=1):
+                    audio_input = gr.Audio(type="filepath", label="Hindi audio clip (upload or record)")
+                    analyze_btn = gr.Button("Analyze", variant="primary")
+                    details_md = gr.Markdown("*Clip details appear here after analysis.*")
+                    with gr.Accordion("Case details", open=False):
+                        case_ref_box = gr.Textbox(label="Case reference")
+                        examiner_box = gr.Textbox(label="Examiner")
+                        notes_box = gr.Textbox(label="Notes", lines=3)
+                with gr.Column(scale=2):
+                    banner = gr.HTML(_PLACEHOLDER)
+                    strip_img = gr.Image(label="Timeline: p(synthetic) per 4-second window", show_label=True)
+                    window_dd = gr.Dropdown(label="Segment (defaults to the most suspicious)", choices=[], value=None)
+                    with gr.Row():
+                        spectrogram_img = gr.Image(label="Mel spectrogram (selected segment)", height=320)
+                        overlay_img = gr.Image(label="Grad-CAM (selected segment)", height=320)
+                    report_btn = gr.Button("Generate case report")
+                    report_files = gr.File(label="Case report", file_count="multiple")
+                    with gr.Accordion("All segment scores", open=False):
+                        table = gr.Dataframe(headers=_TABLE_HEADERS, interactive=False)
+                    clear_btn = gr.ClearButton(
+                        [audio_input, details_md, banner, strip_img, window_dd, spectrogram_img, overlay_img, table]
+                    )
+
+        with gr.Tab("Batch"):
+            gr.Markdown("Score every audio file in a folder. The folder is only read; results are written to `reports/`.")
+            batch_folder = gr.Textbox(label="Folder path")
+            batch_recursive = gr.Checkbox(label="Include subfolders", value=False)
+            batch_expected = gr.Dropdown(["(unknown)", "all real", "all fake"], value="(unknown)", label="Expected label")
+            batch_btn = gr.Button("Run batch", variant="primary")
+            batch_summary = gr.Markdown()
+            batch_table = gr.Dataframe(headers=batch.CSV_COLUMNS, interactive=False)
+            batch_files = gr.File(label="Batch results (CSV + JSON)", file_count="multiple")
 
     outputs = [details_md, banner, strip_img, window_dd, spectrogram_img, overlay_img, table, result_state]
     # Button only: wiring audio_input.change as well would analyze every upload twice.
@@ -181,6 +229,8 @@ with gr.Blocks(title="FakeWave") as demo:
         inputs=[result_state, window_dd, case_ref_box, examiner_box, notes_box],
         outputs=report_files,
     )
+
+    batch_btn.click(fn=run_batch, inputs=[batch_folder, batch_recursive, batch_expected], outputs=[batch_summary, batch_table, batch_files])
 
 if __name__ == "__main__":
     demo.launch()

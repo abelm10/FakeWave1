@@ -44,6 +44,11 @@ _PIPELINE_KEYS = [
 ]
 
 
+def pipeline_params(config=CONFIG):
+    """The preprocessing parameters that pin exactly how a result was produced."""
+    return {k: config[k] for k in _PIPELINE_KEYS}
+
+
 def sha256_file(path, chunk_size=1 << 20):
     """Hex SHA-256 of a file, streamed so large files are never fully in memory."""
     import hashlib
@@ -97,7 +102,7 @@ def build_report_data(result, metadata, source_path, model_path,
             "n_windows": result["n_windows"],
             "suspect_threshold": timeline.SUSPECT_THRESHOLD,
             "clear_threshold": timeline.CLEAR_THRESHOLD,
-            "pipeline": {k: config[k] for k in _PIPELINE_KEYS},
+            "pipeline": pipeline_params(config),
         },
         "findings": {
             "headline": result["headline"],
