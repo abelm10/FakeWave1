@@ -23,6 +23,7 @@ from train import DeepfakeCNN, AUDIO_EXTS, CLASS_DIRNAMES
 CLASS_NAMES = ["real", "fake"]
 
 
+
 def gather_holdout(data_dir):
     files, labels = [], []
     for label_name, label in [("real", 0), ("fake", 1)]:
