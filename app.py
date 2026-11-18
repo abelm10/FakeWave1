@@ -21,9 +21,11 @@ import gradio as gr
 print(f"gradio {gr.__version__}")
 
 from predict import load_model
+import report
 import timeline
 
-_model = load_model()  # loaded once at startup, reused across requests
+MODEL_PATH = "detector.pt"   # keep in sync with whatever load_model actually opens
+_model = load_model(MODEL_PATH)  # loaded once at startup, reused across requests
 
 _PLACEHOLDER = '<div style="padding:18px;border-radius:8px;background:#eee;color:#555">Upload a clip and press Analyze.</div>'
 _TABLE_HEADERS = ["#", "start (s)", "end (s)", "p(synthetic)", "verdict"]
@@ -91,7 +93,8 @@ def analyze(audio_path, progress=gr.Progress()):
         spec_rgb,
         overlay_rgb,
         rows,
-        result,
+        # the report is built from this cached dict alone (never by re-running the analysis)
+        {**result, "source_path": audio_path, "metadata": meta},
     )
 
 
@@ -110,6 +113,33 @@ def show_window(index, result):
     return spec_rgb, overlay_rgb
 
 
+def make_report(result, index, case_ref, examiner, notes):
+    """Build the case report from the cached analysis only: no re-decode of the
+    source file and no re-run of analyze_timeline."""
+    if result is None:
+        raise gr.Error("Analyze a clip first")
+    try:
+        sr = result["sr"]
+        w = result["windows"][int(index) if index is not None else 0]
+        _, spec_rgb, overlay_rgb = timeline.explain_window(
+            result["conditioned_wav"], sr, round(w["start_sec"] * sr), round(w["end_sec"] * sr), _model,
+        )
+        strip = timeline.render_timeline_strip(result)
+        data = report.build_report_data(
+            result, result["metadata"], result["source_path"], MODEL_PATH,
+            case_ref=case_ref, examiner=examiner, notes=notes,
+        )
+        label = f"segment {w['index']}: {w['start_sec']:.1f}-{w['end_sec']:.1f}s (p={w['fake_prob']:.2f})"
+        html_str = report.render_report_html(
+            data, report.png_data_uri(strip), report.png_data_uri(spec_rgb),
+            report.png_data_uri(overlay_rgb), label,
+        )
+        html_path, json_path = report.write_report(data, html_str)
+    except Exception as exc:
+        raise gr.Error(f"Could not generate the report: {exc}")
+    return [html_path, json_path]
+
+
 with gr.Blocks(title="FakeWave") as demo:
     gr.Markdown(
         '<h1 style="text-align:center">FakeWave</h1>\n'
@@ -122,6 +152,10 @@ with gr.Blocks(title="FakeWave") as demo:
             audio_input = gr.Audio(type="filepath", label="Hindi audio clip (upload or record)")
             analyze_btn = gr.Button("Analyze", variant="primary")
             details_md = gr.Markdown("*Clip details appear here after analysis.*")
+            with gr.Accordion("Case details", open=False):
+                case_ref_box = gr.Textbox(label="Case reference")
+                examiner_box = gr.Textbox(label="Examiner")
+                notes_box = gr.Textbox(label="Notes", lines=3)
         with gr.Column(scale=2):
             banner = gr.HTML(_PLACEHOLDER)
             strip_img = gr.Image(label="Timeline: p(synthetic) per 4-second window", show_label=True)
@@ -129,6 +163,8 @@ with gr.Blocks(title="FakeWave") as demo:
             with gr.Row():
                 spectrogram_img = gr.Image(label="Mel spectrogram (selected segment)", height=320)
                 overlay_img = gr.Image(label="Grad-CAM (selected segment)", height=320)
+            report_btn = gr.Button("Generate case report")
+            report_files = gr.File(label="Case report", file_count="multiple")
             with gr.Accordion("All segment scores", open=False):
                 table = gr.Dataframe(headers=_TABLE_HEADERS, interactive=False)
             clear_btn = gr.ClearButton(
@@ -140,6 +176,11 @@ with gr.Blocks(title="FakeWave") as demo:
     analyze_btn.click(fn=analyze, inputs=audio_input, outputs=outputs)
     window_dd.change(fn=show_window, inputs=[window_dd, result_state], outputs=[spectrogram_img, overlay_img])
     clear_btn.click(fn=lambda: None, inputs=None, outputs=result_state)
+    report_btn.click(
+        fn=make_report,
+        inputs=[result_state, window_dd, case_ref_box, examiner_box, notes_box],
+        outputs=report_files,
+    )
 
 if __name__ == "__main__":
     demo.launch()
