@@ -295,8 +295,19 @@ def log_mel(wav, sr, n_fft, hop_length, n_mels):
     return torchaudio.transforms.AmplitudeToDB()(mel)  # (1, n_mels, time)
 
 
-def _run_pipeline(path, config, random_crop=False, rng=None):
-    """Steps 1-6, shared by the Dataset, the CLI plots, and the sanity checks."""
+def condition_audio(path, config=CONFIG):
+    """Steps 1-4 only: decode, resample, codec-normalize, trim silence.
+
+    Stops BEFORE crop (step 5) and loudness normalization (step 6) so a caller can
+    slice its own window and finish the pipeline itself -- see timeline.py. Steps 3
+    and 4 are whole-file properties (codec artifacts, leading/trailing silence) and
+    belong here; step 6 is per-window and must NOT be hoisted into this function,
+    because at training time RMS is computed on the 4-second crop, not on the whole
+    clip.
+
+    Label-independent like every other step in this module. Returns
+    (raw_wav, raw_sr, conditioned_wav).
+    """
     raw_wav, raw_sr = load_raw(path)
     wav = resample(raw_wav, raw_sr, config["target_sr"])
     wav = mp3_roundtrip(wav, config["target_sr"], config["mp3_bitrate_kbps"])
@@ -304,6 +315,12 @@ def _run_pipeline(path, config, random_crop=False, rng=None):
         wav, config["target_sr"], config["silence_top_db"],
         config["silence_frame_ms"], config["silence_hop_ms"],
     )
+    return raw_wav, raw_sr, wav
+
+
+def _run_pipeline(path, config, random_crop=False, rng=None):
+    """Steps 1-6, shared by the Dataset, the CLI plots, and the sanity checks."""
+    raw_wav, raw_sr, wav = condition_audio(path, config)
     wav = crop_or_pad(
         wav, config["target_sr"], config["target_duration_sec"],
         random_crop=random_crop, rng=rng,
