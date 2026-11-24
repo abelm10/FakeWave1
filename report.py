@@ -135,14 +135,24 @@ def plain_language_summary(data):
     n = an["n_windows"]
     suspect, clear = an["suspect_threshold"], an["clear_threshold"]
 
+    if n == 1:
+        examined = "in a single four-second segment"
+    else:
+        examined = f"in {n} overlapping four-second segments"
     out = [
-        f"This recording was examined in {n} overlapping four-second "
-        f"{'segment' if n == 1 else 'segments'} covering "
+        f"This recording was examined {examined} covering "
         f"{an['analyzed_duration_sec']:.1f} seconds of audio."
     ]
 
     headline = fi["headline"]
-    if headline == "Likely authentic":
+    n_flag = fi["n_suspect"]
+    if headline == "Likely authentic" and n_flag > 0:
+        out.append(
+            "The recording's readings are low overall, but "
+            f"{n_flag} segment{'' if n_flag == 1 else 's'} reached or exceeded the "
+            f"{suspect:.2f} flagging threshold, the strongest at {fi['max_fake_prob']:.2f}."
+        )
+    elif headline == "Likely authentic":
         out.append(
             "No segment showed the characteristics this system associates with "
             "AI-generated speech; the strongest reading on any single segment was "
@@ -150,9 +160,9 @@ def plain_language_summary(data):
             "which a segment is flagged."
         )
     elif headline == "Likely synthetic":
-        k = fi["n_suspect"]
+        lead = "One" if n_flag == 1 else str(n_flag)
         out.append(
-            f"{k} of those segments showed characteristics this system associates with "
+            f"{lead} of those segments showed characteristics this system associates with "
             f"AI-generated speech, the strongest reading being {fi['max_fake_prob']:.2f} "
             f"against a flagging threshold of {suspect:.2f}."
         )
@@ -163,16 +173,21 @@ def plain_language_summary(data):
             f"indicates authentic speech and {suspect:.2f} or above indicates synthetic speech."
         )
 
-    if headline == "Likely synthetic":
+    if headline == "Likely synthetic" or (headline == "Likely authentic" and n_flag > 0):
         flagged = sorted((s for s in fi["segments"] if s["verdict"] == "synthetic"),
                          key=lambda s: s["index"])
         idx = [s["index"] for s in flagged]
-        if flagged and idx == list(range(idx[0], idx[0] + len(idx))):
-            out.append(
-                "The flagged segments are contiguous, covering "
-                f"{min(s['start_sec'] for s in flagged):.1f} to "
-                f"{max(s['end_sec'] for s in flagged):.1f} seconds of the recording."
-            )
+        contiguous = bool(flagged) and idx == list(range(idx[0], idx[0] + len(idx)))
+        if contiguous:
+            start = min(s["start_sec"] for s in flagged)
+            end = max(s["end_sec"] for s in flagged)
+            if len(flagged) == 1:
+                out.append(f"That segment covers {start:.1f} to {end:.1f} seconds of the recording.")
+            else:
+                out.append(
+                    f"The flagged segments are contiguous, covering {start:.1f} to "
+                    f"{end:.1f} seconds of the recording."
+                )
         else:
             out.append(
                 "The flagged segments are distributed across the recording rather "
