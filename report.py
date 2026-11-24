@@ -146,6 +146,15 @@ def plain_language_summary(data):
 
     headline = fi["headline"]
     n_flag = fi["n_suspect"]
+    single_flagged = n == 1 and n_flag == 1 and headline in ("Likely authentic", "Likely synthetic")
+    if single_flagged:
+        # One segment in total: sentence 1 already gave its duration, so no location sentence.
+        out.append(
+            "That segment showed characteristics this system associates with "
+            f"AI-generated speech, with a reading of {fi['max_fake_prob']:.2f} against "
+            f"a flagging threshold of {suspect:.2f}."
+        )
+        return out
     if headline == "Likely authentic" and n_flag > 0:
         out.append(
             "The recording's readings are low overall, but "
