@@ -109,6 +109,7 @@ def build_report_data(result, metadata, source_path, model_path,
             "mean_fake_prob": result["mean_fake_prob"],
             "max_fake_prob": result["max_fake_prob"],
             "n_suspect": result["n_suspect"],
+            "n_inconclusive": sum(1 for w in result["windows"] if w["verdict"] == "inconclusive"),
             "n_windows": result["n_windows"],
             "segments": [
                 {k: w[k] for k in ("index", "start_sec", "end_sec", "fake_prob", "verdict")}
@@ -117,6 +118,73 @@ def build_report_data(result, metadata, source_path, model_path,
         },
         "limitations": LIMITATIONS,
     }
+
+
+def plain_language_summary(data):
+    """Two to three sentences describing the finding in non-technical language.
+
+    TEMPLATED, NOT GENERATED. The same analysis must always produce the same words:
+    a forensic document whose wording drifted between runs would not be defensible.
+    No model, no randomness, no dependence on the current date.
+
+    Avoids stating any reading as a probability -- the limitations section is
+    explicit that these are uncalibrated outputs, so the text frames every number
+    as a score against a threshold, never as a percentage likelihood.
+    """
+    an, fi = data["analysis"], data["findings"]
+    n = an["n_windows"]
+    suspect, clear = an["suspect_threshold"], an["clear_threshold"]
+
+    out = [
+        f"This recording was examined in {n} overlapping four-second "
+        f"{'segment' if n == 1 else 'segments'} covering "
+        f"{an['analyzed_duration_sec']:.1f} seconds of audio."
+    ]
+
+    headline = fi["headline"]
+    if headline == "Likely authentic":
+        out.append(
+            "No segment showed the characteristics this system associates with "
+            "AI-generated speech; the strongest reading on any single segment was "
+            f"{fi['max_fake_prob']:.2f}, against the {suspect:.2f} threshold at "
+            "which a segment is flagged."
+        )
+    elif headline == "Likely synthetic":
+        k = fi["n_suspect"]
+        out.append(
+            f"{k} of those segments showed characteristics this system associates with "
+            f"AI-generated speech, the strongest reading being {fi['max_fake_prob']:.2f} "
+            f"against a flagging threshold of {suspect:.2f}."
+        )
+    else:
+        out.append(
+            "The readings were mixed and fall between the two thresholds used to make a "
+            f"finding, averaging {fi['mean_fake_prob']:.2f} where {clear:.2f} or below "
+            f"indicates authentic speech and {suspect:.2f} or above indicates synthetic speech."
+        )
+
+    if headline == "Likely synthetic":
+        flagged = sorted((s for s in fi["segments"] if s["verdict"] == "synthetic"),
+                         key=lambda s: s["index"])
+        idx = [s["index"] for s in flagged]
+        if flagged and idx == list(range(idx[0], idx[0] + len(idx))):
+            out.append(
+                "The flagged segments are contiguous, covering "
+                f"{min(s['start_sec'] for s in flagged):.1f} to "
+                f"{max(s['end_sec'] for s in flagged):.1f} seconds of the recording."
+            )
+        else:
+            out.append(
+                "The flagged segments are distributed across the recording rather "
+                "than forming one contiguous passage."
+            )
+    elif fi["n_inconclusive"] > 0:
+        k = fi["n_inconclusive"]
+        out.append(
+            f"{k} segment{' fell' if k == 1 else 's fell'} into the inconclusive band "
+            "and could not be classified either way."
+        )
+    return out
 
 
 _CSS = """
@@ -165,9 +233,11 @@ def _kv_table(rows):
     return f'<table class="kv">{body}</table>'
 
 
-def render_report_html(data, timeline_png, spectrogram_png, gradcam_png, selected_label):
+def render_technical_html(data, timeline_png, spectrogram_png, gradcam_png, selected_label,
+                          summary_filename):
     """Complete standalone HTML document; images are data URIs. `*_png` arguments
-    are data URIs as returned by png_data_uri()."""
+    are data URIs as returned by png_data_uri(). `summary_filename` is used only
+    for the cross-reference line."""
     rep, case, ev = data["report"], data["case"], data["evidence"]
     an, fi = data["analysis"], data["findings"]
     color = timeline.HEADLINE_COLORS[fi["headline"]]
@@ -218,9 +288,10 @@ def render_report_html(data, timeline_png, spectrogram_png, gradcam_png, selecte
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FakeWave case report</title>
+<title>FakeWave — Technical Report</title>
 <style>{_CSS}</style></head><body>
-<h1>FakeWave case report</h1>
+<h1>FakeWave — Technical Report</h1>
+<p class="sub">Summary report: {_e(summary_filename)}</p>
 <p class="sub">Generated {_e(rep["generated_utc"])} (UTC) / {_e(rep["generated_local"])} (local) &middot; {_e(rep["tool"])} {_e(rep["tool_version"])}</p>
 
 <h2>Case details</h2>
@@ -254,13 +325,79 @@ def render_report_html(data, timeline_png, spectrogram_png, gradcam_png, selecte
 """
 
 
-def write_report(data, html_str, out_dir="reports"):
-    """Write <stem>.html and <stem>.json under out_dir; returns (html_path, json_path)."""
+def render_summary_html(data, timeline_png, technical_filename):
+    """Standalone summary document: the finding in plain language plus the timeline.
+    Rendered from the same data dict as the technical report."""
+    rep, case, ev = data["report"], data["case"], data["evidence"]
+    an, fi = data["analysis"], data["findings"]
+    color = timeline.HEADLINE_COLORS[fi["headline"]]
+
+    case_html = ""
+    if any(case.values()):
+        case_html = "<h2>Case details</h2>" + _kv_table([
+            ("Case reference", _e(case["case_reference"])),
+            ("Examiner", _e(case["examiner"])),
+            ("Notes", f'<div class="pre">{_e(case["notes"])}</div>'),
+        ])
+    ev_tbl = _kv_table([
+        ("File name", _e(ev["filename"])),
+        ("Duration", f'{_num(ev["duration_sec"], ".2f")} s'),
+        ("SHA-256", f'<span class="mono">{_e(ev["sha256"])}</span>'),
+    ])
+    band = (
+        f'<div class="band" style="background:{color}">'
+        f'<div class="headline">{_e(fi["headline"])}</div>'
+        f'<div>mean p(synthetic) <b>{fi["mean_fake_prob"]:.3f}</b> &nbsp;|&nbsp; '
+        f'max <b>{fi["max_fake_prob"]:.3f}</b> &nbsp;|&nbsp; '
+        f'{fi["n_suspect"]} of {fi["n_windows"]} segments flagged '
+        f'(p &ge; {an["suspect_threshold"]})</div></div>'
+    )
+    para = " ".join(_e(t) for t in plain_language_summary(data))
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FakeWave — Summary Report</title>
+<style>{_CSS}</style></head><body>
+<h1>FakeWave — Summary Report</h1>
+<p class="sub">Generated {_e(rep["generated_utc"])} (UTC) / {_e(rep["generated_local"])} (local) &middot; {_e(rep["tool"])} {_e(rep["tool_version"])}</p>
+
+{case_html}
+
+<h2>Evidence</h2>
+{ev_tbl}
+
+<h2>Findings</h2>
+{band}
+<p>{para}</p>
+
+<h2>Timeline exhibit</h2>
+<div class="exhibit"><img src="{timeline_png}" alt="Timeline of p(synthetic) per segment">
+<div class="caption">p(synthetic) for each {an["window_sec"]}-second window across the analyzed clip. Dashed lines mark the two thresholds.</div></div>
+
+<h2>Limitations</h2>
+<div class="limits">{_e(data["limitations"])}</div>
+
+<p><em>Full technical detail, including per-segment scores, spectrogram and Grad-CAM exhibits, and the analysis parameters, is in the accompanying technical report: {_e(technical_filename)}.</em></p>
+</body></html>
+"""
+
+
+def report_filenames(data):
+    """(summary, technical, json) filenames sharing one timestamp and hash."""
+    stamp = datetime.fromisoformat(data["report"]["generated_utc"]).strftime("%Y%m%dT%H%M%SZ")
+    tail = f"{stamp}_{data['evidence']['sha256'][:8]}"
+    return (f"fakewave_summary_{tail}.html", f"fakewave_technical_{tail}.html",
+            f"fakewave_report_{tail}.json")
+
+
+def write_report(data, summary_html, technical_html, out_dir="reports"):
+    """Write summary, technical and JSON files under out_dir; returns the three paths.
+    Callers needing the filenames before rendering use report_filenames()."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.fromisoformat(data["report"]["generated_utc"]).strftime("%Y%m%dT%H%M%SZ")
-    stem = f"fakewave_report_{stamp}_{data['evidence']['sha256'][:8]}"
-    html_path, json_path = out / f"{stem}.html", out / f"{stem}.json"
-    html_path.write_text(html_str, encoding="utf-8")
-    json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return str(html_path), str(json_path)
+    names = report_filenames(data)
+    contents = (summary_html, technical_html, json.dumps(data, indent=2))
+    for name, text in zip(names, contents):
+        (out / name).write_text(text, encoding="utf-8")
+    return [str(out / n) for n in names]

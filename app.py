@@ -138,14 +138,17 @@ def make_report(result, index, case_ref, examiner, notes):
             case_ref=case_ref, examiner=examiner, notes=notes,
         )
         label = f"segment {w['index']}: {w['start_sec']:.1f}-{w['end_sec']:.1f}s (p={w['fake_prob']:.2f})"
-        html_str = report.render_report_html(
-            data, report.png_data_uri(strip), report.png_data_uri(spec_rgb),
-            report.png_data_uri(overlay_rgb), label,
+        summary_name, technical_name, _ = report.report_filenames(data)
+        strip_uri = report.png_data_uri(strip)
+        summary_html = report.render_summary_html(data, strip_uri, technical_name)
+        technical_html = report.render_technical_html(
+            data, strip_uri, report.png_data_uri(spec_rgb),
+            report.png_data_uri(overlay_rgb), label, summary_name,
         )
-        html_path, json_path = report.write_report(data, html_str)
+        paths = report.write_report(data, summary_html, technical_html)
     except Exception as exc:
         raise gr.Error(f"Could not generate the report: {exc}")
-    return [html_path, json_path]
+    return paths
 
 
 def run_batch(folder, recursive, expected, progress=gr.Progress()):
@@ -214,8 +217,8 @@ with gr.Blocks(title="FakeWave") as demo:
                     with gr.Row():
                         spectrogram_img =gr.Image(label="Mel spectrogram (selected segment)", height=320)
                         overlay_img = gr.Image(label="Grad-CAM (selected segment)", height=320)
-                    report_btn = gr.Button("Generate case report")
-                    report_files = gr.File(label="Case report", file_count="multiple")
+                    report_btn = gr.Button("Generate case reports")
+                    report_files = gr.File(label="Case reports", file_count="multiple")
                     with gr.Accordion("All segment scores", open=False):
                         table = gr.Dataframe(headers=_TABLE_HEADERS, interactive=False)
                     clear_btn = gr.ClearButton(
